@@ -841,7 +841,10 @@ mod tests {
             expr: "0 */4 * * *".into(),
             tz: None,
         };
-        let now = Utc::now();
+        // Use a fixed time to avoid flaky test (not close to minute boundary)
+        let now = chrono::DateTime::parse_from_rfc3339("2024-06-15T12:15:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let next = compute_next_run_after(&schedule, now);
         // Must be strictly after `now` and at least ~1 hour away
         // (the closest 4-hourly boundary is at least minutes away).
