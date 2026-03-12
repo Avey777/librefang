@@ -1,0 +1,27 @@
+name: Sync Install Scripts
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: librefang/librefang-website
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy install scripts
+        run: |
+          cp ../librefang/scripts/install.sh public/install.sh
+          cp ../librefang/scripts/install.ps1 public/install.ps1
+
+      - name: Commit and push
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "chore: sync install scripts from release ${{ github.event.release.tag_name }}" || echo "No changes"
+          git push
