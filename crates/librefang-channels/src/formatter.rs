@@ -335,7 +335,11 @@ fn markdown_to_wecom_plain(text: &str) -> String {
 
     let mut collapsed = Vec::new();
     for line in result_lines {
-        if line.is_empty() && collapsed.last().is_some_and(|prev: &String| prev.is_empty()) {
+        if line.is_empty()
+            && collapsed
+                .last()
+                .is_some_and(|prev: &String| prev.is_empty())
+        {
             continue;
         }
         collapsed.push(line);
