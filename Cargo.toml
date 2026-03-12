@@ -37,7 +37,7 @@ toml = "0.8"
 rmp-serde = "1"
 
 # Error handling
-thiserror = "2"
+thiserror = "2.0"
 anyhow = "1"
 
 # Concurrency
