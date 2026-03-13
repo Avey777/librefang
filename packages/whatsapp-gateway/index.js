@@ -30,10 +30,11 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 // ---------------------------------------------------------------------------
 async function startConnection() {
   if (isConnecting) {
-    console.log('[gateway] Connection already in progress, skipping.');
+    console.log('[gateway] Connection attempt already in progress, skipping');
     return;
   }
   isConnecting = true;
+  try {
 
   // Dynamic imports — Baileys is ESM-only in v6+
   const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } =
@@ -104,18 +105,20 @@ async function startConnection() {
         }
       } else if (statusCode === DisconnectReason.restartRequired ||
                  statusCode === DisconnectReason.timedOut) {
-        // Recoverable — reconnect with exponential backoff
+        // Recoverable — reconnect automatically with max attempt limit
         reconnectAttempts += 1;
-        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
           console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
           connStatus = 'disconnected';
-          statusMessage = `Reconnection failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Restart manually.`;
+          statusMessage = `Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`;
         } else {
           const delay = Math.min(
             2000 * Math.pow(1.5, reconnectAttempts - 1),
             MAX_RECONNECT_DELAY,
           );
-          console.log(`[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+          console.log(
+            `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
+          );
           connStatus = 'disconnected';
           statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
           setTimeout(() => startConnection(), delay);
@@ -177,6 +180,9 @@ async function startConnection() {
       }
     }
   });
+  } finally {
+    isConnecting = false;
+  }
 }
 
 // ---------------------------------------------------------------------------

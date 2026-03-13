@@ -3,6 +3,7 @@
 //! Uses Slack Socket Mode WebSocket (app token) for receiving events and the
 //! Web API (bot token) for sending responses. No external Slack crate.
 
+use crate::bridge::SENDER_USER_ID_KEY;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -370,8 +371,11 @@ async fn parse_slack_event(
 
     let channel = event["channel"].as_str()?;
 
-    // Filter by allowed channels
-    if !allowed_channels.is_empty() && !allowed_channels.contains(&channel.to_string()) {
+    // Filter by allowed channels. DMs are exempt and handled by dm_policy.
+    if !channel.starts_with('D')
+        && !allowed_channels.is_empty()
+        && !allowed_channels.contains(&channel.to_string())
+    {
         return None;
     }
 
@@ -414,14 +418,20 @@ async fn parse_slack_event(
     };
 
     let mut metadata = HashMap::new();
+    metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(user_id));
     if event_type == "app_mention" {
         metadata.insert("was_mentioned".to_string(), serde_json::json!(true));
     }
+
+    // Slack channel prefixes: D = direct message, other channel types are group contexts.
+    let is_group = !channel.starts_with('D');
 
     Some(ChannelMessage {
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
         sender: ChannelUser {
+            // For DMs, platform_id is the DM channel ID (D*), not the user ID.
+            // The actual sender user ID is in metadata[SENDER_USER_ID_KEY].
             platform_id: channel.to_string(),
             display_name: user_id.to_string(), // Slack user IDs as display name
             librefang_user: None,
@@ -429,7 +439,7 @@ async fn parse_slack_event(
         content,
         target_agent: None,
         timestamp,
-        is_group: true,
+        is_group,
         thread_id: None,
         metadata,
     })
@@ -453,6 +463,13 @@ mod tests {
         let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
+        assert_eq!(
+            msg.metadata
+                .get(SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("U456")
+        );
+        assert!(msg.is_group);
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Hello agent!"));
     }
 
@@ -620,7 +637,35 @@ mod tests {
         let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
+        assert_eq!(
+            msg.metadata
+                .get(SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("U456")
+        );
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Edited message text"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_dm_detected() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "user": "U456",
+            "channel": "D789",
+            "text": "Hello via DM",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert!(!msg.is_group);
+        assert_eq!(msg.sender.platform_id, "D789");
+        assert_eq!(
+            msg.metadata
+                .get(SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
+            Some("U456")
+        );
     }
 
     #[test]
