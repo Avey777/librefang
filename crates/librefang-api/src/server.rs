@@ -84,8 +84,12 @@ pub async fn build_router(
         // make cross-origin requests. Restrict to known origins instead.
         let mut origins: Vec<axum::http::HeaderValue> = vec![
             format!("http://{listen_addr}").parse().unwrap(),
-            format!("http://localhost:{DEFAULT_API_PORT}").parse().unwrap(),
-            format!("http://127.0.0.1:{DEFAULT_API_PORT}").parse().unwrap(),
+            format!("http://localhost:{DEFAULT_API_PORT}")
+                .parse()
+                .unwrap(),
+            format!("http://127.0.0.1:{DEFAULT_API_PORT}")
+                .parse()
+                .unwrap(),
             "http://localhost:8080".parse().unwrap(),
             "http://127.0.0.1:8080".parse().unwrap(),
         ];
