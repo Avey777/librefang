@@ -5,11 +5,11 @@ import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listMediaProviders } from "../api";
-import type { ApprovalItem, SessionListItem } from "../api";
+import { buildAuthenticatedWebSocketUrl, listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval, getFullConfig, listAgentSessions, createAgentSession, switchAgentSession, deleteSession, listModels, patchAgentConfig, listMediaProviders } from "../api";
+import type { ApprovalItem, SessionListItem, ModelItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Copy, Volume2, Pause, Loader2 } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -661,16 +661,35 @@ function ChatInput({ onSend, disabled, placeholder, authMissing, providerName }:
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected, modelName, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, onModelChange }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean; modelName?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
+  agentId: string; onModelChange: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
+  // Model popover state
+  const [modelOpen, setModelOpen] = useState(false);
+  const modelRef = useRef<HTMLDivElement>(null);
+  const [models, setModels] = useState<ModelItem[]>([]);
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
+  const [patchError, setPatchError] = useState<string | null>(null);
+  const [patchPending, setPatchPending] = useState(false);
+  const [optimisticModel, setOptimisticModel] = useState<string | null>(null);
+
+  // Clear optimistic model once the real modelName catches up
+  useEffect(() => {
+    if (optimisticModel && modelName === optimisticModel) {
+      setOptimisticModel(null);
+    }
+  }, [modelName, optimisticModel]);
+
+  // Close session dropdown on outside click
   useEffect(() => {
     if (!sessionOpen) return;
     const handler = (e: MouseEvent) => {
@@ -681,6 +700,50 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [sessionOpen]);
+
+  // Close model popover on outside click
+  useEffect(() => {
+    if (!modelOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setModelOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [modelOpen]);
+
+  // Fetch available models lazily when popover first opens
+  useEffect(() => {
+    if (!modelOpen || models.length > 0 || modelLoading) return;
+    setModelLoading(true);
+    setModelFetchError(null);
+    listModels({ available: true })
+      .then(res => setModels(res.models))
+      .catch(() => setModelFetchError(t("chat.unable_to_load_models")))
+      .finally(() => setModelLoading(false));
+  }, [modelOpen, models.length, modelLoading]);
+
+  const filteredModels = models.filter(m =>
+    (m.provider + " " + (m.id || "")).toLowerCase().includes(modelSearch.toLowerCase())
+  );
+
+  async function handleSelectModel(model: ModelItem) {
+    const prev = optimisticModel ?? modelName ?? null;
+    setOptimisticModel(model.id);
+    setPatchPending(true);
+    setPatchError(null);
+    try {
+      await patchAgentConfig(agentId, { model: model.id, provider: model.provider });
+      setModelOpen(false);
+      onModelChange(); // invalidates queries; useEffect clears optimisticModel when modelName catches up
+    } catch {
+      setOptimisticModel(prev);
+      setPatchError(t("chat.model_update_failed"));
+    } finally {
+      setPatchPending(false);
+    }
+  }
 
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface to-transparent flex items-center justify-between">
@@ -705,9 +768,77 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
         )}
       </div>
       <div className="flex items-center gap-2">
-        {modelName && (
-          <span className="hidden sm:inline text-[10px] text-text-dim/50 font-mono truncate max-w-[200px]">{modelName}</span>
-        )}
+        {/* Model switcher */}
+        <div className="relative hidden sm:block" ref={modelRef}>
+          <button
+            onClick={() => setModelOpen(v => !v)}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono text-text-dim/50 hover:text-text hover:bg-surface-hover transition-colors truncate max-w-[200px]"
+            title="Switch model"
+          >
+            <span className="truncate">{optimisticModel ?? modelName ?? t("chat.no_model")}</span>
+            <ChevronDown className={`h-2.5 w-2.5 shrink-0 transition-transform ${modelOpen ? "rotate-180" : ""}`} />
+          </button>
+          {modelOpen && (
+            <div className="absolute right-0 top-full mt-1 w-80 bg-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden">
+              <div className="p-2 border-b border-border-subtle/50">
+                <span className="text-[10px] font-semibold text-text-dim/50 uppercase tracking-wider px-2">{t("chat.switch_model")}</span>
+              </div>
+              <div className="p-2 border-b border-border-subtle/50">
+                <input
+                  autoFocus
+                  type="text"
+                  value={modelSearch}
+                  onChange={e => setModelSearch(e.target.value)}
+                  placeholder={t("chat.search_models")}
+                  className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
+                />
+                {patchError && (
+                  <p className="text-error text-[10px] mt-1.5 px-1">{patchError}</p>
+                )}
+              </div>
+              <div className={`max-h-64 overflow-y-auto scrollbar-thin p-1.5 space-y-0.5 ${patchPending ? "pointer-events-none opacity-60" : ""}`}>
+                {modelLoading && (
+                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-text-dim">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {t("chat.loading_models")}
+                  </div>
+                )}
+                {modelFetchError && (
+                  <div className="px-2.5 py-2 space-y-1.5">
+                    <p className="text-xs text-error">{modelFetchError}</p>
+                    <button
+                      onClick={() => { setModels([]); setModelFetchError(null); }}
+                      className="text-[10px] text-brand hover:underline"
+                    >
+                      {t("chat.retry")}
+                    </button>
+                  </div>
+                )}
+                {!modelLoading && !modelFetchError && filteredModels.length === 0 && (
+                  <p className="px-2.5 py-2 text-xs text-text-dim">{t("chat.no_models_found")}</p>
+                )}
+                {!modelLoading && !modelFetchError && filteredModels.map(model => {
+                  const isActive = model.id === (optimisticModel ?? modelName);
+                  return (
+                    <div
+                      key={`${model.provider}/${model.id}`}
+                      onClick={() => { if (!isActive) handleSelectModel(model); }}
+                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
+                    >
+                      {isActive && patchPending
+                        ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                        : isActive && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+                      }
+                      <span className="text-[10px] text-text-dim/60 shrink-0">{model.provider}</span>
+                      <span className="text-[10px]">·</span>
+                      <span className="text-xs font-medium truncate">{model.id}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
         {/* Session dropdown */}
         {sessions && sessions.length > 0 && (
           <div className="relative" ref={dropdownRef}>
@@ -1170,6 +1301,8 @@ export function ChatPage() {
               onSwitchSession={handleSwitchSession}
               onNewSession={handleNewSession}
               onDeleteSession={handleDeleteSession}
+              agentId={selectedAgentId}
+              onModelChange={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
             />
           )}
 
