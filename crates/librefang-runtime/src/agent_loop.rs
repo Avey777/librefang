@@ -356,6 +356,12 @@ pub struct AgentLoopResult {
     pub experiment_context: Option<ExperimentContext>,
     /// Latency in milliseconds for this request.
     pub latency_ms: u64,
+    /// Index in `session.messages` where messages appended during this turn
+    /// begin. Callers use this to slice out the turn's new messages (e.g. for
+    /// writing to a canonical cross-channel session) without tracking their
+    /// own index — which would go stale if the loop trims session history.
+    /// Always in range [0, session.messages.len()] after the loop returns.
+    pub new_messages_start: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -484,11 +490,20 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Start index of new messages added during this turn. Initialized to
+    // current session length so early returns (before the user message is
+    // pushed) expose an empty slice to callers. Updated after
+    // safe_trim_messages to point at the post-trim position of the just-
+    // pushed user message (len-1) so slicing stays in-bounds even when the
+    // trim drains deeper than (len - MAX_HISTORY_MESSAGES). Fixes #2067.
+    let mut new_messages_start = session.messages.len();
+
     // Early return if driver is not configured
     if !driver.is_configured() {
         return Ok(AgentLoopResult {
             silent: true,
             provider_not_configured: true,
+            new_messages_start,
             ..Default::default()
         });
     }
@@ -716,9 +731,6 @@ pub async fn run_agent_loop(
         None
     };
 
-    // Track message count before this turn so auto_memorize only processes new messages.
-    let messages_before = session.messages.len();
-
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
@@ -812,6 +824,11 @@ pub async fn run_agent_loop(
         &manifest.name,
         user_message,
     );
+
+    // Update new_messages_start now that trim has run and the user message
+    // has been pushed. The trim drains only from the front and
+    // find_safe_trim_point keeps len >= 1, so the user msg sits at len-1.
+    new_messages_start = session.messages.len().saturating_sub(1);
 
     // Proactively strip base64 image data from previous turns.  Images that
     // survived from earlier sessions (e.g. after a crash or daemon restart)
@@ -1002,6 +1019,7 @@ pub async fn run_agent_loop(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
 
@@ -1184,7 +1202,7 @@ pub async fn run_agent_loop(
                 // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
-                    let new_messages = &session.messages[messages_before..];
+                    let new_messages = &session.messages[new_messages_start..];
                     let messages_json = serialize_session_messages(new_messages);
                     match pm_store
                         .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
@@ -1235,6 +1253,7 @@ pub async fn run_agent_loop(
                     provider_not_configured: false,
                     experiment_context: experiment_context.clone(),
                     latency_ms: 0,
+                    new_messages_start,
                 });
             }
             StopReason::ToolUse => {
@@ -1684,6 +1703,7 @@ pub async fn run_agent_loop(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -2002,6 +2022,11 @@ pub async fn run_agent_loop_streaming(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
+    // Start index of new messages added during this turn. See the matching
+    // comment in run_agent_loop for details. Initialized to the current
+    // session length, updated post-trim to len-1. Fixes #2067.
+    let mut new_messages_start = session.messages.len();
+
     // Skip streaming agent loop if no LLM provider is configured.
     if !driver.is_configured() {
         info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
@@ -2009,6 +2034,7 @@ pub async fn run_agent_loop_streaming(
             silent: true,
             provider_not_configured: true,
             experiment_context: None,
+            new_messages_start,
             ..Default::default()
         });
     }
@@ -2239,9 +2265,6 @@ pub async fn run_agent_loop_streaming(
         None
     };
 
-    // Track message count before this turn so auto_memorize only processes new messages.
-    let messages_before = session.messages.len();
-
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
     // Mutable collector for memory conflicts detected during this turn.
@@ -2331,6 +2354,10 @@ pub async fn run_agent_loop_streaming(
         &manifest.name,
         user_message,
     );
+
+    // Update new_messages_start now that trim has run and the user message
+    // has been pushed. See iterative-path comment for details.
+    new_messages_start = session.messages.len().saturating_sub(1);
 
     // Proactively strip stale image data from previous turns (streaming path).
     strip_prior_image_data(&mut messages);
@@ -2571,6 +2598,7 @@ pub async fn run_agent_loop_streaming(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
 
@@ -2749,7 +2777,7 @@ pub async fn run_agent_loop_streaming(
                 // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
-                    let new_messages = &session.messages[messages_before..];
+                    let new_messages = &session.messages[new_messages_start..];
                     let messages_json = serialize_session_messages(new_messages);
                     match pm_store
                         .auto_memorize(&user_id, &messages_json, sender_user_id.as_deref())
@@ -2803,6 +2831,7 @@ pub async fn run_agent_loop_streaming(
                     provider_not_configured: false,
                     experiment_context,
                     latency_ms: 0,
+                    new_messages_start,
                 });
             }
             StopReason::ToolUse => {
@@ -3254,6 +3283,7 @@ pub async fn run_agent_loop_streaming(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        new_messages_start,
                     });
                 }
                 let text = response.text();
@@ -4076,6 +4106,116 @@ mod tests {
     #[test]
     fn test_max_history_messages() {
         assert_eq!(MAX_HISTORY_MESSAGES, 40);
+    }
+
+    /// Regression for issue #2067: auto_memorize sliced `session.messages`
+    /// with an index captured **before** `safe_trim_messages` ran, so when
+    /// `find_safe_trim_point` scanned forward and trimmed deeper than
+    /// `len - MAX_HISTORY_MESSAGES`, the slice went out of range and the
+    /// agent_loop task panicked ("range start index 42 out of range for
+    /// slice of length 36").
+    ///
+    /// After the fix, `new_messages_start` is captured POST-trim as
+    /// `len.saturating_sub(1)`, pointing at the user message that was just
+    /// pushed — which must always be the last message in the session because
+    /// safe_trim_messages only drains from the front. This test pins both
+    /// halves: it shows the OLD index would have been out of bounds for the
+    /// trimmed session, AND that the NEW index yields a valid slice
+    /// containing exactly the just-pushed user message. The same index is
+    /// exposed via `AgentLoopResult::new_messages_start` so kernel-side
+    /// callers (e.g. canonical-session append) don't need to track their own
+    /// stale index.
+    #[test]
+    fn test_safe_trim_leaves_user_message_sliceable_after_deep_trim() {
+        // Build 42 messages where the tail forms tool-pair chains that
+        // force find_safe_trim_point to scan past the minimum trim depth.
+        // Pattern: user question -> assistant(tool_use) -> user(tool_result)
+        // repeated. A safe boundary is a User msg that is NOT a tool-result.
+        let mut session_messages: Vec<Message> = Vec::new();
+        for i in 0..13 {
+            // Plain turn: user question + assistant reply.
+            session_messages.push(Message::user(format!("q{i}")));
+            session_messages.push(Message::assistant(format!("a{i}")));
+        }
+        // Push a run of tool-pair messages so indices near min_trim are NOT
+        // safe boundaries, forcing the forward scan to skip ahead.
+        for i in 0..7 {
+            let tool_use_id = format!("tu-{i}");
+            session_messages.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: tool_use_id.clone(),
+                    name: "noop".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+            });
+            session_messages.push(Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name: "noop".to_string(),
+                    content: format!("r{i}"),
+                    is_error: false,
+                }]),
+                pinned: false,
+            });
+        }
+        // Capture the OLD (buggy) index: len BEFORE pushing the current
+        // turn's user message, which is what the old code used.
+        let old_messages_before = session_messages.len();
+
+        // Push the current turn's user message. At this point
+        // len = 26 + 14 + 1 = 41, which is > MAX_HISTORY_MESSAGES=40 and
+        // will trigger safe_trim_messages.
+        session_messages.push(Message::user("current turn"));
+        assert!(session_messages.len() > MAX_HISTORY_MESSAGES);
+
+        let mut llm_messages = session_messages.clone();
+        safe_trim_messages(
+            &mut llm_messages,
+            &mut session_messages,
+            "test-agent",
+            "current turn",
+        );
+
+        // The forward scan in find_safe_trim_point skipped past the tool-pair
+        // run, so the trim drained deeper than (old_len+1) - MAX_HISTORY.
+        // This is the exact shape that produced the issue #2067 panic.
+        assert!(
+            session_messages.len() < old_messages_before,
+            "expected deep trim to put old_messages_before out of bounds \
+             (old_before={old_messages_before}, post_trim_len={})",
+            session_messages.len()
+        );
+
+        // Post-trim invariants used by the fix at the auto_memorize call
+        // site: session is non-empty, the just-pushed user msg is the last
+        // element, and slicing at len-1 yields exactly that one message.
+        assert!(!session_messages.is_empty());
+        let new_messages_start = session_messages.len().saturating_sub(1);
+        let tail = &session_messages[new_messages_start..];
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].role, Role::User);
+        match &tail[0].content {
+            MessageContent::Text(t) => assert_eq!(t, "current turn"),
+            other => panic!("expected text user msg, got {other:?}"),
+        }
+    }
+
+    /// Verifies that AgentLoopResult exposes a usable `new_messages_start`
+    /// by default so kernel-side callers can always rely on the field
+    /// existing without worrying about uninitialized state.
+    #[test]
+    fn test_agent_loop_result_new_messages_start_default_is_zero() {
+        let result = AgentLoopResult::default();
+        assert_eq!(result.new_messages_start, 0);
+        // Defensively clamping against an empty vec must yield an empty slice.
+        let empty: Vec<Message> = Vec::new();
+        let start = result.new_messages_start.min(empty.len());
+        assert_eq!(start, 0);
+        assert!(empty[start..].is_empty());
     }
 
     #[test]
