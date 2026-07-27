@@ -37,6 +37,12 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Fixed
 
+- Fix goal creation from the dashboard always failing: the create form seeds `parent_id` and `agent_id` as empty strings and posted them verbatim, so `POST /api/goals` read `Some("")` for the parent, looked for a goal literally named `""`, and answered `404 Parent goal '' not found` for every goal a user tried to create.
+  The blank `agent_id` was persisted too, and later made `POST /api/goals/{id}/start` reject the goal with "Assign an agent to this goal before starting a run" on a goal the user never assigned.
+  Both layers are fixed: the API now normalizes a blank (or whitespace-only) `parent_id` / `agent_id` to "absent" on create and treats it as the same clear-this-link signal as `null` on update, and the dashboard stops sending the empty fields at all.
+  A non-blank `agent_id` that is not a valid UUID is now rejected up front with `400 Invalid agent_id` on both create and update, instead of being silently stored and only surfacing later as the same misleading "Assign an agent to this goal before starting a run" message on a goal that was in fact assigned.
+  The six built-in goal templates rendering on every visit is by design — they are a static catalog, and `handleApplyTemplate` already posts `{title, description, status}` with no `parent_id`, so applying one was never affected (#6562) (@houko)
+||||||| 57c8e6bd
 - Fix interactive menu button callbacks (`/models` provider and model pickers, "back to providers") being silently dropped on Telegram, which made every press a no-op with no reply and no error.
   The bridge's menu interceptor read the pressed menu's id from `metadata["message_id"]` with `as_str()` only, so it resolved `None` and hit an early `return` on both sidecars: the Rust adapter wrote the id as a JSON number (`serde_json::Value::as_str` never matches a number), and the Python adapter never puts the id in callback metadata at all — it sets the canonical top-level `message_id`, which the daemon stores as `ChannelMessage.platform_message_id`.
   The resolver now accepts a string or a number from metadata and falls back to `platform_message_id`, so both adapters work; the Rust adapter also emits the id as a string in both slots, matching the wire contract already used by `message_event`, by `SidecarMessageParams.message_id: Option<String>`, and by the Python adapter.
